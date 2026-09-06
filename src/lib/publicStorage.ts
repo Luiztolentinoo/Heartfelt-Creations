@@ -38,7 +38,9 @@ export interface ReportRequest {
   createdAt: string
   appointmentAt?: string
   professionalName?: string
+  result?: 'Apto' | 'Não Apto'
   resultAt?: string
+  resultObservations?: string
 }
 
 const ACCOUNTS_KEY = 'upa-public-accounts-v1'
@@ -128,6 +130,53 @@ export function getRequestsForAccount(accountId: string) {
   return read<ReportRequest[]>(REQUESTS_KEY, [])
     .filter((request) => request.accountId === accountId)
     .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
+}
+
+export function getAllReportRequests() {
+  return read<ReportRequest[]>(REQUESTS_KEY, [])
+    .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
+}
+
+export function updateReportRequestLocal(request: ReportRequest) {
+  const next = read<ReportRequest[]>(REQUESTS_KEY, []).map((item) => item.id === request.id ? request : item)
+  write(REQUESTS_KEY, next)
+  return request
+}
+
+export function scheduleReportRequestLocal(requestId: string, appointmentAt: string) {
+  const request = getAllReportRequests().find((item) => item.id === requestId)
+  if (!request) throw new Error('Solicitação não localizada.')
+  return updateReportRequestLocal({ ...request, status: 'Agendado', appointmentAt })
+}
+
+export function takeReportRequestLocal(requestId: string, professionalName: string) {
+  const request = getAllReportRequests().find((item) => item.id === requestId)
+  if (!request) throw new Error('Solicitação não localizada.')
+  return updateReportRequestLocal({ ...request, status: 'Em avaliação', professionalName })
+}
+
+export function cancelReportRequestLocal(requestId: string) {
+  const request = getAllReportRequests().find((item) => item.id === requestId)
+  if (!request) throw new Error('Solicitação não localizada.')
+  return updateReportRequestLocal({ ...request, status: 'Cancelado' })
+}
+
+export function finalizeReportRequestLocal(
+  requestId: string,
+  professionalName: string,
+  result: 'Apto' | 'Não Apto',
+  observations?: string,
+) {
+  const request = getAllReportRequests().find((item) => item.id === requestId)
+  if (!request) throw new Error('Solicitação não localizada.')
+  return updateReportRequestLocal({
+    ...request,
+    status: result === 'Apto' ? 'Aprovado' : 'Negado',
+    professionalName,
+    result,
+    resultAt: new Date().toISOString(),
+    resultObservations: observations?.trim() || undefined,
+  })
 }
 
 function requestProtocol() {
