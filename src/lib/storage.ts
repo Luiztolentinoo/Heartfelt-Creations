@@ -1,4 +1,5 @@
 import type { Appointment, KitPurchase, MedicalReport, Patient } from '../types'
+import { supabase } from './supabase'
 
 const KITS_KEY = 'upa-kit-purchases-v1'
 const REPORTS_KEY = 'upa-medical-reports-v1'
@@ -36,8 +37,40 @@ export function getReports(): MedicalReport[] {
   return read<MedicalReport[]>(REPORTS_KEY, [])
 }
 
+async function persistMedicalReport(item: MedicalReport) {
+  if (!supabase) return
+
+  const { data: sessionData } = await supabase.auth.getSession()
+  const userId = sessionData.session?.user.id
+  if (!userId) return
+
+  const { error } = await supabase
+    .from('medical_reports')
+    .insert({
+      id: item.id,
+      patient_name: item.patientName,
+      patient_game_id: item.patientGameId,
+      examiner_id: userId,
+      examiner_name: item.examinerName,
+      purpose: item.purpose,
+      result: item.result,
+      issued_at: item.issuedAt,
+    })
+
+  if (error) {
+    console.error('Falha ao persistir laudo no Supabase:', error.message)
+  }
+}
+
 export function saveReport(item: MedicalReport): MedicalReport[] {
-  return write(REPORTS_KEY, [item, ...getReports()])
+  const next = write(REPORTS_KEY, [item, ...getReports()])
+
+  // O preview continua funcionando localmente. Quando houver sessão Supabase,
+  // o laudo também é persistido no banco; a migration de webhook dispara
+  // automaticamente a mensagem no Discord após o INSERT.
+  void persistMedicalReport(item)
+
+  return next
 }
 
 export function getPatients(): Patient[] {
