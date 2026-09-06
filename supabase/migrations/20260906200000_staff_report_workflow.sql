@@ -1,29 +1,6 @@
 alter table public.report_requests
   add column if not exists result_observations text;
 
-create policy "staff can view report requests" on public.report_requests
-for select to authenticated
-using (
-  public.has_permission('view_reports')
-  or public.has_permission('manage_appointments')
-  or public.has_permission('issue_reports')
-);
-
-create policy "authorized staff can update report requests" on public.report_requests
-for update to authenticated
-using (
-  public.has_permission('manage_appointments')
-  or public.has_permission('issue_reports')
-)
-with check (
-  public.has_permission('manage_appointments')
-  or public.has_permission('issue_reports')
-);
-
-create trigger audit_report_requests
-after insert or update or delete on public.report_requests
-for each row execute function public.audit_row_change();
-
 create or replace function public.schedule_report_request(
   request_id uuid,
   appointment_at_value timestamptz
