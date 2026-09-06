@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   BadgeDollarSign,
+  Ban,
   Boxes,
   CalendarDays,
   CheckCircle2,
+  ClipboardCheck,
   ClipboardList,
   FileCheck2,
   HeartPulse,
@@ -17,12 +19,21 @@ import {
   Settings,
   ShieldCheck,
   Stethoscope,
+  UserCheck,
   UserCog,
   Users,
   X,
 } from 'lucide-react'
 import { can, demoUsers } from './lib/permissions'
 import { getAppointments, getKitPurchases, getPatients, getReports, saveKitPurchase, saveReport, updateKitPurchase } from './lib/storage'
+import {
+  cancelStaffReportRequest,
+  finalizeStaffReportRequest,
+  listStaffReportRequests,
+  scheduleStaffReportRequest,
+  takeStaffReportRequest,
+} from './lib/reportWorkflow'
+import type { ReportRequest } from './lib/publicStorage'
 import type { KitPurchase, MedicalReport, Permission, StaffUser } from './types'
 
 const MONEY = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 })
@@ -30,7 +41,7 @@ const UNIT_PURCHASE_COST = 250
 const UNIT_SALE_PRICE = 1600
 const UNIT_HOSPITAL_RETURN = 300
 
-type Page = 'dashboard' | 'agenda' | 'pacientes' | 'laudos' | 'kits' | 'financeiro' | 'funcionarios' | 'auditoria' | 'integracoes'
+type Page = 'dashboard' | 'agenda' | 'solicitacoes' | 'pacientes' | 'laudos' | 'kits' | 'financeiro' | 'funcionarios' | 'auditoria' | 'integracoes'
 
 type NavItem = {
   id: Page
@@ -42,6 +53,7 @@ type NavItem = {
 const nav: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: Activity, anyPermission: ['view_dashboard'] },
   { id: 'agenda', label: 'Agenda', icon: CalendarDays, anyPermission: ['view_appointments'] },
+  { id: 'solicitacoes', label: 'Solicitações de Laudo', icon: ClipboardCheck, anyPermission: ['view_reports', 'manage_appointments', 'issue_reports'] },
   { id: 'pacientes', label: 'Pacientes', icon: Users, anyPermission: ['view_patients'] },
   { id: 'laudos', label: 'Laudos', icon: FileCheck2, anyPermission: ['view_reports'] },
   { id: 'kits', label: 'Controle de Kits', icon: Boxes, anyPermission: ['manage_kits', 'confirm_kit_returns', 'view_finance'] },
@@ -74,7 +86,7 @@ function Login({ onLogin }: { onLogin: (user: StaffUser) => void }) {
         <p className="muted login-copy">Gestão clínica, administrativa e financeira da unidade.</p>
         <div className="login-note">
           <ShieldCheck size={18} />
-          <span>Preview inicial. Escolha um perfil para validar cargos e permissões.</span>
+          <span>Preview interno. Escolha um perfil para validar cargos e permissões.</span>
         </div>
         <div className="profile-grid">
           {demoUsers.map((user) => (
@@ -141,8 +153,9 @@ function Empty({ text }: { text: string }) {
 }
 
 function Status({ value }: { value: string }) {
-  const ok = value === 'Conferido' || value === 'Apto' || value === 'Concluída'
-  return <span className={`status ${ok ? 'status-ok' : 'status-warn'}`}>{value}</span>
+  const ok = value === 'Conferido' || value === 'Apto' || value === 'Concluída' || value === 'Aprovado'
+  const danger = value === 'Negado' || value === 'Cancelado' || value === 'Não Apto'
+  return <span className={`status ${ok ? 'status-ok' : danger ? 'status-danger' : 'status-warn'}`}>{value}</span>
 }
 
 function KitsPage({ user, kits, setKits }: { user: StaffUser; kits: KitPurchase[]; setKits: (items: KitPurchase[]) => void }) {
@@ -234,6 +247,143 @@ function KitsPage({ user, kits, setKits }: { user: StaffUser; kits: KitPurchase[
   )
 }
 
+function RequestsPage({ user }: { user: StaffUser }) {
+  const [requests, setRequests] = useState<ReportRequest[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [appointmentAt, setAppointmentAt] = useState('')
+  const [result, setResult] = useState<'Apto' | 'Não Apto'>('Apto')
+  const [observations, setObservations] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const canSchedule = can(user, 'manage_appointments')
+  const canIssue = can(user, 'issue_reports')
+  const selected = requests.find((item) => item.id === selectedId) ?? null
+
+  async function load() {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await listStaffReportRequests()
+      setRequests(data)
+      if (!selectedId && data[0]) setSelectedId(data[0].id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Não foi possível carregar as solicitações.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  async function run(action: () => Promise<unknown>) {
+    setSaving(true)
+    setError('')
+    try {
+      await action()
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Não foi possível concluir a ação.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function schedule() {
+    if (!selected || !appointmentAt) return
+    const date = new Date(appointmentAt)
+    if (Number.isNaN(date.getTime())) return
+    await run(() => scheduleStaffReportRequest(selected.id, date.toISOString()))
+  }
+
+  async function take() {
+    if (!selected) return
+    await run(() => takeStaffReportRequest(selected.id, user))
+  }
+
+  async function cancel() {
+    if (!selected) return
+    await run(() => cancelStaffReportRequest(selected.id))
+  }
+
+  async function finalize() {
+    if (!selected) return
+    await run(() => finalizeStaffReportRequest(selected, user, result, observations))
+    setObservations('')
+  }
+
+  const pendingCount = requests.filter((item) => ['Solicitado', 'Aguardando agendamento'].includes(item.status)).length
+  const scheduledCount = requests.filter((item) => item.status === 'Agendado').length
+  const evaluationCount = requests.filter((item) => item.status === 'Em avaliação').length
+
+  return <div className="page-stack">
+    <header className="page-header">
+      <div><p className="eyebrow">PORTE DE ARMA</p><h2>Solicitações de laudo</h2><p className="muted">Fila criada pelo portal público. Agende, assuma a avaliação e conclua o processo sem expor informações administrativas ao cidadão.</p></div>
+    </header>
+
+    <section className="stats-grid request-stats">
+      <Stat icon={ClipboardCheck} label="Aguardando agendamento" value={String(pendingCount)} />
+      <Stat icon={CalendarDays} label="Agendados" value={String(scheduledCount)} />
+      <Stat icon={Stethoscope} label="Em avaliação" value={String(evaluationCount)} />
+      <Stat icon={FileCheck2} label="Finalizados" value={String(requests.filter((item) => ['Aprovado', 'Negado'].includes(item.status)).length)} />
+    </section>
+
+    {error && <div className="restricted request-error"><ShieldCheck size={22}/><div><strong>Não foi possível concluir a operação</strong><p>{error}</p></div></div>}
+
+    <section className="request-workspace">
+      <article className="panel request-list-panel">
+        <div className="panel-heading"><div><h3>Fila de solicitações</h3><p className="muted">Clique em uma solicitação para abrir os controles.</p></div><button className="secondary" onClick={() => void load()} disabled={loading}>Atualizar</button></div>
+        {loading ? <Empty text="Carregando solicitações..."/> : requests.length === 0 ? <Empty text="Nenhuma solicitação pública recebida ainda."/> : (
+          <div className="table-wrap"><table><thead><tr><th>Protocolo</th><th>Cidadão</th><th>Período</th><th>Status</th><th></th></tr></thead><tbody>
+            {requests.map((request) => <tr key={request.id} className={request.id === selectedId ? 'selected-row' : ''}>
+              <td><strong>{request.protocol}</strong><small className="table-sub">{formatDate(request.createdAt)}</small></td>
+              <td>{request.requesterName}<small className="table-sub">ID {request.requesterGameId}</small></td>
+              <td>{request.preferredPeriod}</td>
+              <td><Status value={request.status}/></td>
+              <td><button className="table-action" onClick={() => { setSelectedId(request.id); setAppointmentAt(request.appointmentAt ? new Date(request.appointmentAt).toISOString().slice(0,16) : '') }}><Search size={15}/> Abrir</button></td>
+            </tr>)}
+          </tbody></table></div>
+        )}
+      </article>
+
+      <article className="panel request-detail-panel">
+        {!selected ? <Empty text="Selecione uma solicitação."/> : <>
+          <div className="panel-heading"><div><p className="eyebrow">{selected.protocol}</p><h3>{selected.requesterName}</h3><p className="muted">ID {selected.requesterGameId} • {selected.purpose}</p></div><Status value={selected.status}/></div>
+
+          <div className="request-details-grid">
+            <div><span>Solicitado em</span><strong>{formatDate(selected.createdAt)}</strong></div>
+            <div><span>Preferência</span><strong>{selected.preferredPeriod}</strong></div>
+            <div><span>Agendamento</span><strong>{selected.appointmentAt ? formatDate(selected.appointmentAt) : 'Ainda não agendado'}</strong></div>
+            <div><span>Responsável</span><strong>{selected.professionalName || 'Não atribuído'}</strong></div>
+          </div>
+          {selected.notes && <div className="request-note"><span>Observação enviada pelo cidadão</span><p>{selected.notes}</p></div>}
+
+          {!['Aprovado','Negado','Cancelado'].includes(selected.status) && canSchedule && <div className="request-action-block">
+            <h4>Agendamento</h4>
+            <div className="inline-action"><input type="datetime-local" value={appointmentAt} onChange={(e) => setAppointmentAt(e.target.value)}/><button className="primary" disabled={saving || !appointmentAt} onClick={() => void schedule()}><CalendarDays size={17}/> Salvar agendamento</button></div>
+          </div>}
+
+          {!['Aprovado','Negado','Cancelado'].includes(selected.status) && canIssue && <div className="request-action-block">
+            <h4>Avaliação</h4>
+            {selected.status !== 'Em avaliação' && <button className="secondary" disabled={saving} onClick={() => void take()}><UserCheck size={17}/> Assumir esta avaliação</button>}
+            <div className="form-grid compact-form">
+              <label><span>Resultado final</span><select value={result} onChange={(e) => setResult(e.target.value as 'Apto' | 'Não Apto')}><option>Apto</option><option>Não Apto</option></select></label>
+              <label className="wide"><span>Observações do laudo</span><textarea value={observations} onChange={(e) => setObservations(e.target.value)} placeholder="Informações relevantes da avaliação..." rows={3}/></label>
+            </div>
+            <button className="primary" disabled={saving} onClick={() => void finalize()}><FileCheck2 size={17}/> Finalizar laudo e atualizar cidadão</button>
+            <p className="microcopy">Em produção, a finalização gera o laudo oficial, atualiza o status público e dispara o webhook de laudos no Discord.</p>
+          </div>}
+
+          {!['Aprovado','Negado','Cancelado'].includes(selected.status) && canSchedule && <button className="danger-button" disabled={saving} onClick={() => void cancel()}><Ban size={16}/> Cancelar solicitação</button>}
+
+          {['Aprovado','Negado'].includes(selected.status) && <div className="completed-box"><CheckCircle2 size={22}/><div><strong>Processo finalizado</strong><p>Resultado: {selected.result || (selected.status === 'Aprovado' ? 'Apto' : 'Não Apto')}{selected.resultAt ? ` • ${formatDate(selected.resultAt)}` : ''}</p></div></div>}
+        </>}
+      </article>
+    </section>
+  </div>
+}
+
 function LaudosPage({ user }: { user: StaffUser }) {
   const [reports, setReports] = useState(getReports())
   const [patientName, setPatientName] = useState('')
@@ -251,8 +401,8 @@ function LaudosPage({ user }: { user: StaffUser }) {
   }
 
   return <div className="page-stack">
-    <header className="page-header"><div><p className="eyebrow">AVALIAÇÃO CLÍNICA</p><h2>Laudos médicos</h2><p className="muted">Emissão para porte de arma com acesso controlado por função.</p></div>{allowed && <span className="permission-pill"><FileCheck2 size={16}/> Autorizado a emitir</span>}</header>
-    {allowed ? <section className="panel form-panel"><div className="panel-heading"><div><h3>Emitir novo laudo</h3><p className="muted">A emissão fica registrada com o profissional responsável.</p></div></div><div className="form-grid"><label><span>Nome do paciente</span><input value={patientName} onChange={(e) => setPatientName(e.target.value)} placeholder="Nome completo" /></label><label><span>ID do paciente</span><input value={patientId} onChange={(e) => setPatientId(e.target.value)} placeholder="ID da cidade" /></label><label><span>Resultado</span><select value={result} onChange={(e) => setResult(e.target.value as 'Apto' | 'Não Apto')}><option>Apto</option><option>Não Apto</option></select></label></div><button className="primary" onClick={issue}><FileCheck2 size={18}/> Emitir laudo</button></section> : <div className="restricted"><ShieldCheck size={26}/><div><strong>Emissão protegida</strong><p>Você pode consultar laudos, mas somente a função responsável — como Psicólogo autorizado — pode emitir um novo documento.</p></div></div>}
+    <header className="page-header"><div><p className="eyebrow">AVALIAÇÃO CLÍNICA</p><h2>Laudos médicos</h2><p className="muted">Histórico e emissão excepcional para porte de arma com acesso controlado por função.</p></div>{allowed && <span className="permission-pill"><FileCheck2 size={16}/> Autorizado a emitir</span>}</header>
+    {allowed ? <section className="panel form-panel"><div className="panel-heading"><div><h3>Emitir laudo avulso</h3><p className="muted">Para solicitações do portal público, prefira a tela “Solicitações de Laudo” para manter o cidadão atualizado.</p></div></div><div className="form-grid"><label><span>Nome do paciente</span><input value={patientName} onChange={(e) => setPatientName(e.target.value)} placeholder="Nome completo" /></label><label><span>ID do paciente</span><input value={patientId} onChange={(e) => setPatientId(e.target.value)} placeholder="ID da cidade" /></label><label><span>Resultado</span><select value={result} onChange={(e) => setResult(e.target.value as 'Apto' | 'Não Apto')}><option>Apto</option><option>Não Apto</option></select></label></div><button className="primary" onClick={issue}><FileCheck2 size={18}/> Emitir laudo</button></section> : <div className="restricted"><ShieldCheck size={26}/><div><strong>Emissão protegida</strong><p>Você pode consultar laudos, mas somente a função responsável — como Psicólogo autorizado — pode emitir um novo documento.</p></div></div>}
     <section className="panel"><div className="panel-heading"><div><h3>Laudos emitidos</h3><p className="muted">Histórico de avaliações para porte de arma.</p></div></div>{reports.length === 0 ? <Empty text="Nenhum laudo emitido."/> : <div className="table-wrap"><table><thead><tr><th>Paciente</th><th>ID</th><th>Responsável</th><th>Data</th><th>Resultado</th></tr></thead><tbody>{reports.map((r) => <tr key={r.id}><td>{r.patientName}</td><td>{r.patientGameId}</td><td>{r.examinerName}</td><td>{formatDate(r.issuedAt)}</td><td><Status value={r.result}/></td></tr>)}</tbody></table></div>}</section>
   </div>
 }
@@ -267,7 +417,7 @@ function GenericPage({ page }: { page: Page }) {
     return <div className="page-stack"><header className="page-header"><div><p className="eyebrow">CADASTROS</p><h2>Pacientes</h2><p className="muted">Consulta rápida aos pacientes cadastrados.</p></div><button className="secondary"><Search size={17}/> Buscar paciente</button></header><section className="panel"><div className="table-wrap"><table><thead><tr><th>Nome</th><th>ID</th><th>Telefone</th><th>Status</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.gameId}</td><td>{row.phone || '—'}</td><td><Status value={row.status}/></td></tr>)}</tbody></table></div></section></div>
   }
   const titles: Record<Page, [string,string,string]> = {
-    dashboard: ['', '', ''], agenda: ['', '', ''], pacientes: ['', '', ''], laudos: ['', '', ''], kits: ['', '', ''],
+    dashboard: ['', '', ''], agenda: ['', '', ''], solicitacoes: ['', '', ''], pacientes: ['', '', ''], laudos: ['', '', ''], kits: ['', '', ''],
     financeiro: ['GESTÃO', 'Financeiro', 'Resumo de retornos ao cofre e conferências de kits.'],
     funcionarios: ['ADMINISTRAÇÃO', 'Funcionários', 'Hierarquia, funções e permissões da equipe da UPA.'],
     auditoria: ['SEGURANÇA', 'Auditoria', 'Histórico protegido de ações administrativas e financeiras.'],
@@ -310,11 +460,12 @@ export default function App() {
       <header className="topbar"><button className="menu-button" onClick={() => setMenuOpen(true)}><Menu/></button><div className="topbar-title"><span>UPA</span><strong>Área Administrativa</strong></div><div className="topbar-actions"><span className="role-badge">{user.hierarchyRole}</span><MessageSquare size={19}/></div></header>
       <main className="content">
         {page === 'dashboard' && <Dashboard kits={kits}/>} 
+        {page === 'solicitacoes' && <RequestsPage user={user}/>} 
         {page === 'kits' && <KitsPage user={user} kits={kits} setKits={setKits}/>} 
         {page === 'laudos' && <LaudosPage user={user}/>} 
         {page === 'financeiro' && <FinancePage kits={kits}/>} 
         {page === 'funcionarios' && <StaffPage/>}
-        {!['dashboard','kits','laudos','financeiro','funcionarios'].includes(page) && <GenericPage page={page}/>} 
+        {!['dashboard','solicitacoes','kits','laudos','financeiro','funcionarios'].includes(page) && <GenericPage page={page}/>} 
       </main>
     </div>
     {menuOpen && <button className="scrim" aria-label="Fechar menu" onClick={() => setMenuOpen(false)}/>} 
